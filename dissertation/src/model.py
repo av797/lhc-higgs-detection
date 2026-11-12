@@ -1,0 +1,19 @@
+import torch
+import torch.nn as nn
+
+class HiggsClassifier(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+        self.network = nn.Sequential(
+            nn.Linear(41, 64),
+            nn.ReLU(),
+
+            nn.Linear(64, 32),
+            nn.ReLU(),
+
+            nn.Linear(32, 1)
+        )
+
+    def forward(self, x):
+        return self.network(x)
