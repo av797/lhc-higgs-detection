@@ -1,0 +1,232 @@
+import torch, os, math
+from torch.utils.data import TensorDataset, DataLoader
+from model import HiggsClassifier
+from sklearn.metrics import roc_auc_score, f1_score
+
+
+def calculate_ams(labels, predictions, weights, threshold):
+
+    # Select events whose predicted signal probability meets the threshold
+    selected = predictions >= threshold
+
+    # Calculate weighted signal and background
+    signal = weights[selected & (labels == 1)].sum().item()
+    background = weights[selected & (labels == 0)].sum().item()
+
+    # AMS regularisation term
+    background_regularisation = 10.0
+
+    # Calculate AMS
+    radicand = 2 * (
+        (signal + background + background_regularisation)
+        * math.log1p(signal / (background + background_regularisation))
+        - signal
+    )
+
+    return math.sqrt(max(radicand, 0.0))
+
+def find_best_ams_threshold(labels, predictions, weights):
+
+    labels = torch.tensor(labels, dtype=torch.int64)
+    predictions = torch.tensor(predictions, dtype=torch.float64)
+
+    best_ams = 0.0
+    best_threshold = 0.0
+
+    for threshold in [i / 100 for i in range(1, 100)]:
+
+        ams = calculate_ams(
+            labels,
+            predictions,
+            weights,
+            threshold
+        )
+
+        if ams > best_ams:
+            best_ams = ams
+            best_threshold = threshold
+
+    return best_ams, best_threshold
+
+# Get the dissertation directory
+project_directory = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# Define the processed data path
+data_path = os.path.join(project_directory, "higgs", "results", "processed_data.pt")
+
+data = torch.load(
+    data_path,
+    map_location="cpu",
+    weights_only=False
+)
+
+print("Data loaded successfully!")
+print("Training features:", data["X_train"].shape)
+print("Training labels:", data["y_train"].shape)
+print("Validation features:", data["X_validation"].shape)
+print("Test features:", data["X_test"].shape)
+
+# Load validation event weights and labels
+w_validation = data["w_validation"].double()
+y_validation = data["y_validation"]
+
+# Identify signal and background events
+signal_mask = y_validation == 1
+background_mask = y_validation == 0
+
+# Calculate the weight scaling factors
+signal_factor = (
+    data["total_signal_weight"] / w_validation[signal_mask].sum().item()
+)
+
+background_factor = (
+    data["total_background_weight"] / w_validation[background_mask].sum().item()
+)
+
+# Renormalise validation event weights
+w_validation_ams = w_validation.clone()
+
+w_validation_ams[signal_mask] *= signal_factor
+w_validation_ams[background_mask] *= background_factor
+
+print("\nValidation weight scaling factors:")
+print("Signal:", signal_factor)
+print("Background:", background_factor)
+
+print("\nRenormalised validation weight totals:")
+print("Signal:", w_validation_ams[signal_mask].sum().item())
+print("Background:", w_validation_ams[background_mask].sum().item())
+
+train_dataset = TensorDataset(
+    data["X_train"],
+    data["y_train"]
+)
+
+train_loader = DataLoader(
+    train_dataset,
+    batch_size=1024,
+    shuffle=True
+)
+
+print("Number of training batches:", len(train_loader))
+
+validation_dataset = TensorDataset(
+    data["X_validation"],
+    data["y_validation"]
+)
+
+validation_loader = DataLoader(
+    validation_dataset,
+    batch_size=1024,
+    shuffle=False
+)
+
+print("Number of validation batches:", len(validation_loader))
+
+model = HiggsClassifier()
+
+#Loss function
+criterion = torch.nn.BCEWithLogitsLoss()
+
+#adam intialization
+optimizer = torch.optim.Adam(
+    model.parameters(),
+    lr=0.001
+)
+
+# save the best model based on validation AUC
+best_val_ams = 0.0
+best_threshold = 0.0
+
+model_save_path = os.path.join(
+    project_directory,
+    "higgs",
+    "results",
+    "best_model.pth"
+)
+
+num_epochs = 20
+
+for epoch in range(num_epochs):
+
+    # Training
+    model.train()
+    total_train_loss = 0
+
+    for features, labels in train_loader:
+
+        optimizer.zero_grad()
+
+        outputs = model(features)
+        labels = labels.unsqueeze(1)
+
+        loss = criterion(outputs, labels)
+
+        loss.backward()
+        optimizer.step()
+
+        total_train_loss += loss.item() * features.size(0)
+
+    average_train_loss = total_train_loss / len(train_loader.dataset)
+
+    # Validation
+    model.eval()
+    total_validation_loss = 0
+    all_predictions = []
+    all_labels = []
+
+    with torch.no_grad():
+
+        for features, labels in validation_loader:
+
+            outputs = model(features)
+            labels = labels.unsqueeze(1)
+
+            loss = criterion(outputs, labels)
+            total_validation_loss += loss.item() * features.size(0)
+
+            probabilities = torch.sigmoid(outputs)
+            all_predictions.extend(probabilities.squeeze(1).tolist())
+            all_labels.extend(labels.squeeze(1).tolist())
+
+    average_validation_loss = total_validation_loss / len(validation_loader.dataset)
+
+    #evaluation metrics
+    roc_auc = roc_auc_score(all_labels, all_predictions)
+
+    # Find the threshold that gives the highest validation AMS
+    ams, threshold = find_best_ams_threshold(
+        all_labels,
+        all_predictions,
+        w_validation_ams
+    )
+
+    # Save the model if it achieves a better validation AMS
+    if ams > best_val_ams:
+
+        best_val_ams = ams
+        best_threshold = threshold
+
+        torch.save({
+            "model_state_dict": model.state_dict(),
+            "best_val_ams": best_val_ams,
+            "best_threshold": best_threshold,
+            "epoch": epoch + 1
+        }, model_save_path)
+
+        print("Best model saved!")
+
+    predicted_classes = [1 if p >= 0.5 else 0 for p in all_predictions]
+
+    f1 = f1_score(all_labels, predicted_classes)
+
+    print(
+        f"Epoch [{epoch + 1}/{num_epochs}], "
+        f"Training Loss: {average_train_loss:.4f}, "
+        f"Validation Loss: {average_validation_loss:.4f}, "
+        f"ROC-AUC: {roc_auc:.4f}, "
+        f"AMS: {ams:.4f}, "
+        f"AMS Threshold: {threshold:.2f}, "
+        f"F1-score: {f1:.4f}"
+    )
+
