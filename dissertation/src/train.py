@@ -4,6 +4,8 @@ from model import HiggsClassifier
 from metrics import calculate_ams
 from sklearn.metrics import roc_auc_score, f1_score
 
+torch.manual_seed(42)
+
 def get_model_config(model):
 
     layers = []
@@ -74,7 +76,8 @@ def get_training_config(model, optimizer, criterion, train_loader, validation_lo
         ),
         "training_shuffle": train_loader.sampler.__class__.__name__,
         "validation_shuffle": validation_loader.sampler.__class__.__name__,
-        "drop_last": train_loader.drop_last
+        "drop_last": train_loader.drop_last,
+        "random_seed": 42,
     }
 
 def find_best_ams_threshold(labels, predictions, weights):
@@ -184,7 +187,7 @@ criterion = torch.nn.BCEWithLogitsLoss()
 #adam intialization
 optimizer = torch.optim.Adam(
     model.parameters(),
-    lr=0.001
+    lr=0.0005
 )
 
 # save the best model based on validation AUC
