@@ -4,6 +4,79 @@ from model import HiggsClassifier
 from metrics import calculate_ams
 from sklearn.metrics import roc_auc_score, f1_score
 
+def get_model_config(model):
+
+    layers = []
+
+    for layer in model.network:
+
+        if isinstance(layer, torch.nn.Linear):
+            layers.append({
+                "type": "Linear",
+                "input_features": layer.in_features,
+                "output_features": layer.out_features
+            })
+
+        elif isinstance(layer, torch.nn.ReLU):
+            layers.append({
+                "type": "ReLU"
+            })
+
+        else:
+            layers.append({
+                "type": layer.__class__.__name__
+            })
+
+    linear_layers = [
+        layer for layer in layers
+        if layer["type"] == "Linear"
+    ]
+
+    return {
+        "architecture": model.__class__.__name__,
+        "layers": layers,
+        "number_of_linear_layers": len(linear_layers),
+        "number_of_hidden_layers": len(linear_layers) - 1,
+        "input_features": linear_layers[0]["input_features"],
+        "output_features": linear_layers[-1]["output_features"]
+    }
+
+
+def get_training_config(model, optimizer, criterion, train_loader, validation_loader, num_epochs):
+
+    optimizer_config = {
+        "name": optimizer.__class__.__name__,
+        "parameters": []
+    }
+
+    for group in optimizer.param_groups:
+
+        optimizer_config["parameters"].append({
+            "learning_rate": group["lr"],
+            "weight_decay": group["weight_decay"],
+            "betas": group.get("betas"),
+            "eps": group.get("eps")
+        })
+
+    return {
+        "optimizer": optimizer_config,
+        "loss_function": criterion.__class__.__name__,
+        "batch_size": train_loader.batch_size,
+        "validation_batch_size": validation_loader.batch_size,
+        "epochs": num_epochs,
+        "number_of_parameters": sum(
+            parameter.numel() for parameter in model.parameters()
+        ),
+        "trainable_parameters": sum(
+            parameter.numel()
+            for parameter in model.parameters()
+            if parameter.requires_grad
+        ),
+        "training_shuffle": train_loader.sampler.__class__.__name__,
+        "validation_shuffle": validation_loader.sampler.__class__.__name__,
+        "drop_last": train_loader.drop_last
+    }
+
 def find_best_ams_threshold(labels, predictions, weights):
 
     labels = torch.tensor(labels, dtype=torch.int64)
@@ -103,6 +176,7 @@ validation_loader = DataLoader(
 print("Number of validation batches:", len(validation_loader))
 
 model = HiggsClassifier()
+model_config = get_model_config(model)
 
 #Loss function
 criterion = torch.nn.BCEWithLogitsLoss()
@@ -125,6 +199,15 @@ model_save_path = os.path.join(
 )
 
 num_epochs = 20
+
+training_config = get_training_config(
+    model,
+    optimizer,
+    criterion,
+    train_loader,
+    validation_loader,
+    num_epochs
+)
 
 start_time = time.time()
 
@@ -191,6 +274,8 @@ for epoch in range(num_epochs):
 
         torch.save({
             "model_state_dict": model.state_dict(),
+            "model_config": model_config,
+            "training_config": training_config,
             "best_val_ams": best_val_ams,
             "best_threshold": best_threshold,
             "epoch": epoch + 1
