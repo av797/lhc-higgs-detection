@@ -1,29 +1,8 @@
-import torch, os, math
+import torch, os, time, math
 from torch.utils.data import TensorDataset, DataLoader
 from model import HiggsClassifier
+from metrics import calculate_ams
 from sklearn.metrics import roc_auc_score, f1_score
-
-
-def calculate_ams(labels, predictions, weights, threshold):
-
-    # Select events whose predicted signal probability meets the threshold
-    selected = predictions >= threshold
-
-    # Calculate weighted signal and background
-    signal = weights[selected & (labels == 1)].sum().item()
-    background = weights[selected & (labels == 0)].sum().item()
-
-    # AMS regularisation term
-    background_regularisation = 10.0
-
-    # Calculate AMS
-    radicand = 2 * (
-        (signal + background + background_regularisation)
-        * math.log1p(signal / (background + background_regularisation))
-        - signal
-    )
-
-    return math.sqrt(max(radicand, 0.0))
 
 def find_best_ams_threshold(labels, predictions, weights):
 
@@ -147,7 +126,10 @@ model_save_path = os.path.join(
 
 num_epochs = 20
 
+start_time = time.time()
+
 for epoch in range(num_epochs):
+    epoch_start_time = time.time()
 
     # Training
     model.train()
@@ -229,4 +211,10 @@ for epoch in range(num_epochs):
         f"AMS Threshold: {threshold:.2f}, "
         f"F1-score: {f1:.4f}"
     )
+
+    epoch_time = time.time() - epoch_start_time
+    total_time = time.time() - start_time
+
+    print(f"Epoch time: {epoch_time:.2f} seconds")
+    print(f"Total elapsed time: {total_time / 60:.2f} minutes")
 
